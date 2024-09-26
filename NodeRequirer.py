@@ -84,12 +84,11 @@ class ModuleLoader():
             if os.path.samefile(root, self.project_folder):
                 dirs[:] = [d for d in dirs if d not in exclude]
 
-            # Use a list comprehension to filter and format file paths
-            local_files.extend(
-                os.path.relpath(os.path.join(root, file_name), dirname)
-                for file_name in files
-                if file_name[0] != '.' and file_name != os.path.basename(self.file_name)
-            )
+            for file_name in files:
+                if file_name[0] != '.' and file_name != os.path.basename(self.file_name):
+                    # Construct the full path relative to the project folder
+                    file_path = os.path.relpath(os.path.join(root, file_name), dirname)
+                    local_files.append(file_path)  # Keep the relative path as is
 
         # Prefix with './' to indicate relative paths
         return ["./{}".format(file_path) for file_path in local_files]
@@ -114,7 +113,6 @@ class ModuleLoader():
             if dependency_type in json:
                 dependencies += json[dependency_type].keys()
         
-        print('DEPENCENCIES', dependencies)
         all_exports = []
         for dependency in dependencies:
             dependency_exports = self.get_dependency_exports(dependency)
@@ -127,6 +125,7 @@ class ModuleLoader():
         exports = []
         base_path = os.path.join(self.project_folder, 'node_modules', dependency)
         pkg_path = os.path.join(base_path, 'package.json')
+        print('exports', base_path, pkg_path)
 
         if os.path.exists(pkg_path):
             with open(pkg_path, 'r', encoding='UTF-8') as f:
@@ -209,7 +208,6 @@ class RequireFromWordCommand(sublime_plugin.TextCommand):
 
     def run(self, edit):
         """Called when the command is run."""
-        print('RUN')
         self.edit = edit
         cursor = self.view.sel()[0]
         word_region = self.view.word(cursor)
@@ -266,12 +264,10 @@ class RequireCommand(sublime_plugin.TextCommand):
 
     def run(self, edit, command):
         self.edit = edit
-        print('REQUIRE', command)
 
         if command is 'simple':
             # Must copy the core modules so modifying self.files
             # does not change the core_modules list
-            print('core modules', core_modules)
             self.files = list(core_modules)
 
             func = self.insert
@@ -284,7 +280,6 @@ class RequireCommand(sublime_plugin.TextCommand):
 
         self.module_loader = ModuleLoader(self.view.file_name())
         self.files += self.module_loader.get_file_list()
-        print('MOAR files')
         sublime.active_window().show_quick_panel(
             self.files, self.on_done_call_func(self.files, func))
 
@@ -416,7 +411,7 @@ class RequireInsertHelperCommand(sublime_plugin.TextCommand):
 
     """Command for inserting a basic require statement."""
 
-    print('DAICAZZO startup')
+    print('Startup')
 
     def run(self, edit, args):
         """Insert the require statement after the module has been choosen."""
@@ -515,12 +510,6 @@ class RequireInsertHelperCommand(sublime_plugin.TextCommand):
                 (last_idx, last_bracket) = (idx, pair[0])
         return last_bracket
 
-def clean_module_path(input_string):
-    parts = input_string.split('/')
-    if len(parts) >= 2:
-        return "{}/{}".format(parts[0], parts[-1])
-    return input_string
-
 def get_module_info(module_path, view):
     """Get a dictionary with keys for the module_path and the module_name.
 
@@ -529,10 +518,7 @@ def get_module_info(module_path, view):
     """
     aliased_to = utils.aliased(module_path, view=view)
     omit_extensions = tuple(utils.get_project_pref('omit_extensions', view=view))
-    print(module_path)
-    cleaned_module_path = clean_module_path(module_path)
-    print(cleaned_module_path)
-    module_path = cleaned_module_path
+    print('module_path', module_path)
     if aliased_to:
         module_name = aliased_to
     else:
