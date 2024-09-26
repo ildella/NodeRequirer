@@ -4,16 +4,204 @@ import sublime_plugin
 import os
 import re
 import functools
+import json
 
 from .src import utils
 from .src.RequireSnippet import RequireSnippet
 from .src.modules import core_modules
-from .src.ModuleLoader import ModuleLoader
+# from .src.ModuleLoader import ModuleLoader
 from .src.node_bridge import node_bridge
 
 WORD_SPLIT_RE = re.compile(r"\W+")
 GLOBAL_IMPORT_RE = re.compile(r"^((var|let|const|\s{0,5})\s\w+\s*=\s*)?require\s*\(")
 ESLINT_UNDEF_RE = re.compile(r'"(.*)" is not defined')
+
+HAS_REL_PATH_RE = re.compile(r"\.?\.?\/")
+IS_EXPORT_LINE_COMMONJS = re.compile(r"exports\.(.*?)=")
+IS_EXPORT_LINE_ES6 = re.compile(r"export\s+(var|let|const|function|class)?\s+([^()\[\]{},/*<>%\s-]+)")
+
+class ModuleLoader():
+
+    """Class which handles shared functionality for require commands."""
+
+    def __init__(self, file_name):
+        """Constructor for ModuleLoader."""
+        self.file_name = file_name
+        self.project_folder = self.get_project_folder()
+        print('project_folder', self.project_folder)
+
+        if not self.has_package():
+            return sublime.error_message(
+                'You must have a package.json file in your projects root directory'
+            )
+
+    def has_package(self):
+        """Check if the package.json is in the project directory."""
+        return os.path.exists(
+            os.path.join(self.project_folder, 'package.json')
+        )
+
+    def get_project_folder(self) -> str:
+        """Get the root project folder."""
+        dirname = os.path.dirname(self.file_name)
+        while dirname:
+            pkg = os.path.join(dirname, 'package.json')
+            if os.path.exists(pkg):
+                return dirname
+            parent = os.path.abspath(os.path.join(dirname, os.pardir))
+            if parent == dirname:
+                break
+            dirname = parent
+
+        sublime.error_message(
+            'Can\'t find a package.json corresponding to your '
+            'project. Please ensure it exists.'
+        )
+
+    def get_file_list(self):
+        """Return the list of dependencies and local files."""
+        files = self.get_local_files() + self.get_dependencies()
+        exclude_patterns = utils.file_exclude_patterns()
+
+        def should_include_file(file):
+            for pattern in exclude_patterns:
+                if pattern in file:
+                    return False
+            return True
+        files = list(filter(should_include_file, files))
+        return files
+
+    def get_local_files(self):
+        """Load the list of local files."""
+        if not self.file_name:
+            return []
+
+        dirname = os.path.dirname(self.file_name)
+        exclude = utils.dirs_to_exclude()
+        local_files = []
+
+        for root, dirs, files in os.walk(self.project_folder, topdown=True):
+            if os.path.samefile(root, self.project_folder):
+                dirs[:] = [d for d in dirs if d not in exclude]
+
+            # Use a list comprehension to filter and format file paths
+            local_files.extend(
+                os.path.relpath(os.path.join(root, file_name), dirname)
+                for file_name in files
+                if file_name[0] != '.' and file_name != os.path.basename(self.file_name)
+            )
+
+        # Prefix with './' to indicate relative paths
+        return ["./{}".format(file_path) for file_path in local_files]
+
+    def get_dependencies(self):
+        """Load project dependencies."""
+        return self.get_package_dependencies()
+
+    def get_package_dependencies(self):
+        """Parse the package.json file into a list of dependencies."""
+        package_path = os.path.join(self.project_folder, 'package.json')
+        with open(package_path, 'r', encoding='UTF-8') as f:
+            package_json = json.load(f)
+
+        dependencies = self.get_dependencies_with_type(package_json)
+        return dependencies
+
+    def get_dependencies_with_type(self, json):
+        """Common function for adding dependencies from package.json."""
+        dependencies = []
+        for dependency_type in ['dependencies', 'devDependencies', 'optionalDependencies']:
+            if dependency_type in json:
+                dependencies += json[dependency_type].keys()
+        
+        print('DEPENCENCIES', dependencies)
+        all_exports = []
+        for dependency in dependencies:
+            dependency_exports = self.get_dependency_exports(dependency)
+            all_exports.extend(dependency_exports)
+
+        return all_exports
+
+    def get_dependency_exports(self, dependency):
+        """Get the exports for a specific dependency."""
+        exports = []
+        base_path = os.path.join(self.project_folder, 'node_modules', dependency)
+        pkg_path = os.path.join(base_path, 'package.json')
+
+        if os.path.exists(pkg_path):
+            with open(pkg_path, 'r', encoding='UTF-8') as f:
+                package_json = json.load(f)
+                exports_dict = package_json.get('exports', {})
+                exports = self.parse_exports(exports_dict, dependency)
+
+        return exports
+
+    def get_exports(self, module):
+        """Get a given module's exports (commonjs style)."""
+        if utils.is_core_module(module):
+            return self.get_core_module_exports()
+        elif utils.is_local_file(module):
+            dirname = os.path.dirname(self.file_name)
+            path = os.path.join(dirname, module)
+            return self.get_exports_in_file(path)
+        else:
+            return self.get_dependency_module_exports(module)
+
+    def get_core_module_exports(self):
+        """Retrieve core module exports dynamically."""
+        # Implementation to retrieve core module exports
+        sublime.error_message(
+            'Parsing node core module exports is not yet '
+            'implemented. Feel free to submit a PR!'
+        )
+
+    def get_dependency_module_exports(self, module):
+        """Get a dependency's exports based on package.json."""
+        base_path = os.path.join(self.project_folder, 'node_modules', module)
+        pkg_path = os.path.join(base_path, 'package.json')
+
+        if not os.path.exists(pkg_path):
+            return []
+
+        with open(pkg_path, 'r', encoding='UTF-8') as f:
+            package = json.load(f)
+
+        exports = package.get('exports', {})
+        return self.parse_exports(exports, module)
+
+    def parse_exports(self, exports, module):
+        """Parse the exports field from package.json."""
+        files = []
+        if isinstance(exports, dict):
+            # Handle the root export
+            if '.' in exports:
+                files.append(module)  # Add the root module
+
+            for key, value in exports.items():
+                if key == '.':
+                    continue  # Skip the root export since it's already added
+                files.append("{}/{}".format(module, key.lstrip('./')))  # Remove leading './'
+
+        return files
+
+    def get_exports_in_file(self, fpath):
+        """Get exports in a given file (commonjs)."""
+        exports = []
+        if os.path.isdir(fpath):
+            fpath = os.path.join(fpath, 'index.js')
+        with open(fpath, 'r') as f:
+            for line in f:
+                result = re.search(IS_EXPORT_LINE_COMMONJS, line)
+                if result:
+                    exports.append(result.group(1).strip())
+                result = re.search(IS_EXPORT_LINE_ES6, line)
+                if result:
+                    exports.append(result.group(2).strip())
+
+        if not exports:
+            sublime.error_message('Unable to find specific exports.')
+        return exports
+
 
 class RequireFromWordCommand(sublime_plugin.TextCommand):
 
@@ -21,6 +209,7 @@ class RequireFromWordCommand(sublime_plugin.TextCommand):
 
     def run(self, edit):
         """Called when the command is run."""
+        print('RUN')
         self.edit = edit
         cursor = self.view.sel()[0]
         word_region = self.view.word(cursor)
@@ -76,14 +265,15 @@ class RequireCommand(sublime_plugin.TextCommand):
     """Text Command which prompts for a module and inserts it into the file."""
 
     def run(self, edit, command):
-        """Called when the command is run."""
         self.edit = edit
+        print('REQUIRE', command)
 
-        # Simple Require Command
         if command is 'simple':
             # Must copy the core modules so modifying self.files
             # does not change the core_modules list
+            print('core modules', core_modules)
             self.files = list(core_modules)
+
             func = self.insert
         # Export Command
         else:
@@ -94,7 +284,7 @@ class RequireCommand(sublime_plugin.TextCommand):
 
         self.module_loader = ModuleLoader(self.view.file_name())
         self.files += self.module_loader.get_file_list()
-
+        print('MOAR files')
         sublime.active_window().show_quick_panel(
             self.files, self.on_done_call_func(self.files, func))
 
@@ -226,6 +416,8 @@ class RequireInsertHelperCommand(sublime_plugin.TextCommand):
 
     """Command for inserting a basic require statement."""
 
+    print('DAICAZZO startup')
+
     def run(self, edit, args):
         """Insert the require statement after the module has been choosen."""
         self.edit = edit
@@ -234,7 +426,6 @@ class RequireInsertHelperCommand(sublime_plugin.TextCommand):
         module_info = get_module_info(args['module'], self.view)
         module_path = module_info['module_path']
         module_name = module_info['module_name']
-
         view = self.view
 
         cursor = view.sel()[0]
@@ -324,6 +515,11 @@ class RequireInsertHelperCommand(sublime_plugin.TextCommand):
                 (last_idx, last_bracket) = (idx, pair[0])
         return last_bracket
 
+def clean_module_path(input_string):
+    parts = input_string.split('/')
+    if len(parts) >= 2:
+        return "{}/{}".format(parts[0], parts[-1])
+    return input_string
 
 def get_module_info(module_path, view):
     """Get a dictionary with keys for the module_path and the module_name.
@@ -333,12 +529,16 @@ def get_module_info(module_path, view):
     """
     aliased_to = utils.aliased(module_path, view=view)
     omit_extensions = tuple(utils.get_project_pref('omit_extensions', view=view))
-
+    print(module_path)
+    cleaned_module_path = clean_module_path(module_path)
+    print(cleaned_module_path)
+    module_path = cleaned_module_path
     if aliased_to:
         module_name = aliased_to
     else:
         module_name = os.path.basename(module_path)
         module_name, extension = utils.splitext(module_name)
+        print(module_name, extension)
 
         # When requiring an index.js file, rename the
         # var as the directory directly above
@@ -350,14 +550,13 @@ def get_module_info(module_path, view):
         if is_module_index:
             module_path = os.path.dirname(module_path)
             module_name = os.path.split(module_path)[-1]
-            if module_name == '' or module_name == '.':
-                current_file = view.file_name()
+            if module_name == '':
+                current_file = view.file_module_name()
                 directory = os.path.dirname(current_file)
                 module_name = os.path.split(directory)[-1]
         # Depending on preferences, remove the file extension
         elif module_path.endswith(omit_extensions):
             module_path = utils.splitext(module_path)[0]
-
 
         # Capitalize modules named with dashes
         # i.e. some-thing => SomeThing
@@ -366,7 +565,7 @@ def get_module_info(module_path, view):
     # Fix paths for windows
     if os.sep != '/':
         module_path = module_path.replace(os.sep, '/')
-
+    print(module_path, module_name)
     return {
         'module_path': module_path,
         'module_name': module_name
