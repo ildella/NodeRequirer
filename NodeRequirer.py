@@ -28,7 +28,7 @@ class ModuleLoader():
         """Constructor for ModuleLoader."""
         self.file_name = file_name
         self.project_folder = self.get_project_folder()
-        print('project_folder', self.project_folder)
+        # print('project_folder', self.project_folder)
 
         if not self.has_package():
             return sublime.error_message(
@@ -90,8 +90,8 @@ class ModuleLoader():
                     file_path = os.path.relpath(os.path.join(root, file_name), dirname)
                     local_files.append(file_path)  # Keep the relative path as is
 
-        # Prefix with './' to indicate relative paths
-        return ["./{}".format(file_path) for file_path in local_files]
+        # Prefix with './' to indicate relative paths - only in the same folder
+        return ["./{}".format(file_path) if not file_path.startswith('../') else file_path for file_path in local_files]
 
     def get_dependencies(self):
         """Load project dependencies."""
@@ -125,7 +125,7 @@ class ModuleLoader():
         exports = []
         base_path = os.path.join(self.project_folder, 'node_modules', dependency)
         pkg_path = os.path.join(base_path, 'package.json')
-        print('exports', base_path, pkg_path)
+        # print('exports', base_path, pkg_path)
 
         if os.path.exists(pkg_path):
             with open(pkg_path, 'r', encoding='UTF-8') as f:
@@ -411,7 +411,7 @@ class RequireInsertHelperCommand(sublime_plugin.TextCommand):
 
     """Command for inserting a basic require statement."""
 
-    print('Startup')
+    # print('Startup')
 
     def run(self, edit, args):
         """Insert the require statement after the module has been choosen."""
@@ -518,13 +518,13 @@ def get_module_info(module_path, view):
     """
     aliased_to = utils.aliased(module_path, view=view)
     omit_extensions = tuple(utils.get_project_pref('omit_extensions', view=view))
-    print('module_path', module_path)
+    # print('module_path', module_path)
     if aliased_to:
         module_name = aliased_to
     else:
         module_name = os.path.basename(module_path)
         module_name, extension = utils.splitext(module_name)
-        print(module_name, extension)
+        # print(module_name, extension)
 
         # When requiring an index.js file, rename the
         # var as the directory directly above
@@ -551,7 +551,7 @@ def get_module_info(module_path, view):
     # Fix paths for windows
     if os.sep != '/':
         module_path = module_path.replace(os.sep, '/')
-    print(module_path, module_name)
+    # print(module_path, module_name)
     return {
         'module_path': module_path,
         'module_name': module_name
